@@ -21,10 +21,8 @@ import (
 	"sigs.k8s.io/yaml"
 
 	api "github.com/weaveworks/eksctl/pkg/apis/eksctl.io/v1alpha5"
+	"github.com/weaveworks/eksctl/pkg/iammapping"
 )
-
-type mapRole map[string]interface{}
-type mapRoles []mapRole
 
 const (
 	// ObjectName is the Kubernetes resource name of the auth ConfigMap
@@ -47,6 +45,25 @@ const (
 // RoleNodeGroupGroups are the groups to allow roles to interact
 // with the cluster, required for the instance role ARNs of node groups.
 var RoleNodeGroupGroups = []string{"system:bootstrappers", "system:nodes"}
+
+// MapRole represents an IAM identity with role.
+type MapRole struct {
+	iammapping.Identity `json:",inline"`
+	RoleARN             string `json:"rolearn"`
+}
+
+// MapRoles is a list of IAM identities with roles.
+type MapRoles []MapRole
+
+// Get returns the first matching role it encounters.
+func (rs MapRoles) Get(arn string) (MapRole, bool) {
+	for _, r := range rs {
+		if r.RoleARN == arn {
+			return r, true
+		}
+	}
+	return MapRole{}, false
+}
 
 // AuthConfigMap allows modifying the auth ConfigMap.
 type AuthConfigMap struct {
@@ -141,14 +158,16 @@ func (a *AuthConfigMap) setAccounts(accounts []string) error {
 // a role with given groups. If you are calling
 // this as part of node creation you should use DefaultNodeGroups.
 func (a *AuthConfigMap) AddRole(arn string, username string, groups []string) error {
-	roles, err := a.roles()
+	roles, err := a.Roles()
 	if err != nil {
 		return err
 	}
-	roles = append(roles, mapRole{
-		"rolearn":  arn,
-		"username": username,
-		"groups":   groups,
+	roles = append(roles, MapRole{
+		RoleARN: arn,
+		Identity: iammapping.Identity{
+			Username: username,
+			Groups:   groups,
+		},
 	})
 	logger.Info("adding role %q to auth ConfigMap", arn)
 	return a.setRoles(roles)
@@ -160,13 +179,13 @@ func (a *AuthConfigMap) RemoveRole(arn string) error {
 	if arn == "" {
 		return errors.New("nodegroup instance role ARN is not set")
 	}
-	roles, err := a.roles()
+	roles, err := a.Roles()
 	if err != nil {
 		return err
 	}
 
 	for i, role := range roles {
-		if role["rolearn"] == arn {
+		if role.RoleARN == arn {
 			logger.Info("removing role %q from auth ConfigMap", arn)
 			roles = append(roles[:i], roles[i+1:]...)
 			return a.setRoles(roles)
@@ -176,15 +195,16 @@ func (a *AuthConfigMap) RemoveRole(arn string) error {
 	return fmt.Errorf("instance role ARN %q not found in auth ConfigMap", arn)
 }
 
-func (a *AuthConfigMap) roles() (mapRoles, error) {
-	var roles mapRoles
+// Roles returns a list of roles that are currently in the (cached) configmap.
+func (a *AuthConfigMap) Roles() (MapRoles, error) {
+	var roles MapRoles
 	if err := yaml.Unmarshal([]byte(a.cm.Data[rolesData]), &roles); err != nil {
 		return nil, errors.Wrap(err, "unmarshalling mapRoles")
 	}
 	return roles, nil
 }
 
-func (a *AuthConfigMap) setRoles(r mapRoles) error {
+func (a *AuthConfigMap) setRoles(r MapRoles) error {
 	bs, err := yaml.Marshal(r)
 	if err != nil {
 		return errors.Wrap(err, "marshalling mapRoles")
